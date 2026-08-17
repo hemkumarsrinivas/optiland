@@ -15,6 +15,7 @@ import numpy as np
 
 import optiland.backend as be
 from optiland.backend.utils import to_numpy
+from optiland.nonsequential._utils import DEFAULT_BATCH_SIZE
 from optiland.nonsequential.backends.base import TracerBackend
 
 if TYPE_CHECKING:
@@ -69,7 +70,7 @@ class ArrayBackend(TracerBackend):
         num_rays: int,
         max_depth: int = 16,
         min_flux_fraction: float = 1e-6,
-        batch_size: int = 1_000_000,
+        batch_size: int = DEFAULT_BATCH_SIZE,
         seed: int | None = None,
         record_paths: bool = False,
     ) -> SimulationResult:
@@ -80,7 +81,8 @@ class ArrayBackend(TracerBackend):
             num_rays: Total rays to launch.
             max_depth: Maximum surface hits per ray.
             min_flux_fraction: Kill threshold relative to per-ray initial flux.
-            batch_size: Rays per processing batch.
+            batch_size: Rays per processing batch. Does not change the result,
+                only the speed; see ``DEFAULT_BATCH_SIZE``.
             seed: RNG seed for reproducibility.
             record_paths: If True, records per-ray event log.
 
@@ -265,6 +267,12 @@ class ArrayBackend(TracerBackend):
             while source_remaining > 0:
                 batch = min(batch_size, source_remaining)
                 rays = source.generate(batch, self.rng)
+                # source.generate() spreads the source's whole total_flux over
+                # the rays it is asked for, so a batched source would re-emit
+                # the full flux once per batch. Rescale to this batch's share
+                # of the source's ray budget. A no-op when batch == the budget.
+                if batch != source_num_rays:
+                    rays.flux = rays.flux * (batch / source_num_rays)
 
                 _log_birth(rays, source_name)
 
@@ -287,19 +295,24 @@ class ArrayBackend(TracerBackend):
                     det_first = any_det_hit & (~comp_closer | ~any_comp_hit)
                     comp_first = any_comp_hit & (~det_first)
 
+                    # Rays that reach no detector carry t = inf. Zero those
+                    # before multiplying by a direction: inf * 0 is NaN, which
+                    # the be.where below discards but not before NumPy warns.
+                    det_t_safe = np.where(det_first, det_t_min, 0.0)
+
                     # Record detector hits
                     for di, det in enumerate(scene.detectors):
                         mask_di = det_first & (det_idx == di)
                         if mask_di.any():
                             det_name = getattr(det, "name", f"detector_{di}")
-                            _log_hits(rays, mask_di, det_name, t_offset=det_t_min)
-                            det.record(rays, det_t_min, mask_di)
+                            _log_hits(rays, mask_di, det_name, t_offset=det_t_safe)
+                            det.record(rays, det_t_safe, mask_di)
 
                     # Advance and kill detector-hit rays
                     if det_first.any():
-                        dx = det_t_min * rays.L
-                        dy = det_t_min * rays.M
-                        dz = det_t_min * rays.N
+                        dx = det_t_safe * rays.L
+                        dy = det_t_safe * rays.M
+                        dz = det_t_safe * rays.N
                         rays.x = be.where(det_first, rays.x + dx, rays.x)
                         rays.y = be.where(det_first, rays.y + dy, rays.y)
                         rays.z = be.where(det_first, rays.z + dz, rays.z)

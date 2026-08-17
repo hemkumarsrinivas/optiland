@@ -114,6 +114,7 @@ class Lens(CompoundComponent):
                 mat,
                 cfg.front,
                 InteractionType.REFRACTIVE,
+                f"{self._name}.front",
             )
         )
 
@@ -127,6 +128,7 @@ class Lens(CompoundComponent):
                 VACUUM,
                 cfg.back,
                 InteractionType.REFRACTIVE,
+                f"{self._name}.back",
             )
         )
 
@@ -165,6 +167,7 @@ class Lens(CompoundComponent):
                 VACUUM,
                 cfg.edge,
                 InteractionType.ABSORBING,
+                f"{self._name}.edge",
             )
         )
 
@@ -183,6 +186,7 @@ class Lens(CompoundComponent):
                     VACUUM,
                     cfg.rim,
                     InteractionType.ABSORBING,
+                    f"{self._name}.rim",
                 )
             )
 
@@ -278,6 +282,7 @@ def _make_surface(
     mat_back: NSQMaterial,
     cfg: SurfaceConfig | None,
     interaction: InteractionType,
+    name: str = "",
 ) -> BaseComponent:
     """Construct the correct BaseComponent from config overrides.
 
@@ -288,19 +293,36 @@ def _make_surface(
         mat_back: Back-side material.
         cfg: Optional SurfaceConfig with overrides.
         interaction: Default interaction type.
+        name: Label for this sub-surface, e.g. ``"L1.front"``.
 
     Returns:
         The constructed BaseComponent subclass.
     """
     resolved = _resolve_interaction(cfg, interaction)
     bsdf = cfg.bsdf if cfg is not None else None
+    scatter_fraction = cfg.scatter_fraction if cfg is not None else 1.0
     aperture_override = cfg.aperture_radius if cfg is not None else None
     if aperture_override is not None and hasattr(geom, "aperture_radius"):
         geom.aperture_radius = as_param(aperture_override)
 
     if resolved == InteractionType.REFRACTIVE:
-        return RefractiveComponent(cs, geom, mat_front, mat_back, bsdf=bsdf)
+        return RefractiveComponent(
+            cs,
+            geom,
+            mat_front,
+            mat_back,
+            bsdf=bsdf,
+            name=name,
+            scatter_fraction=scatter_fraction,
+        )
     if resolved == InteractionType.REFLECTIVE:
         # ReflectiveComponent: (cs, geometry, bsdf=None, material_front=VACUUM)
-        return ReflectiveComponent(cs, geom, bsdf=bsdf, material_front=mat_front)
-    return AbsorbingComponent(cs, geom, mat_front)
+        return ReflectiveComponent(
+            cs,
+            geom,
+            bsdf=bsdf,
+            material_front=mat_front,
+            name=name,
+            scatter_fraction=scatter_fraction,
+        )
+    return AbsorbingComponent(cs, geom, mat_front, name=name)

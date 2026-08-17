@@ -19,6 +19,7 @@ import numpy as np
 
 import optiland.backend as be
 from optiland.backend.utils import to_numpy
+from optiland.nonsequential._utils import DEFAULT_BATCH_SIZE
 from optiland.nonsequential.backends.base import TracerBackend
 
 if TYPE_CHECKING:
@@ -118,7 +119,7 @@ class TorchBackend(TracerBackend):
         num_rays: int,
         max_depth: int = 16,
         min_flux_fraction: float = 1e-6,
-        batch_size: int = 1_000_000,
+        batch_size: int = DEFAULT_BATCH_SIZE,
         seed: int | None = None,
         record_paths: bool = False,
     ) -> SimulationResult:
@@ -130,7 +131,8 @@ class TorchBackend(TracerBackend):
             max_depth: Fixed number of bounces. Rays exceeding this are
                 depth-killed. Memory scales O(num_rays × max_depth).
             min_flux_fraction: Kill threshold relative to per-ray initial flux.
-            batch_size: Rays per processing batch (forward pass only).
+            batch_size: Rays per processing batch (forward pass only). Does not
+                change the result, only the speed; see ``DEFAULT_BATCH_SIZE``.
             seed: RNG seed override (overrides constructor seed if provided).
             record_paths: If True, records per-ray event log (numpy, detached).
 
@@ -229,6 +231,12 @@ class TorchBackend(TracerBackend):
             while source_remaining > 0:
                 batch = min(batch_size, source_remaining)
                 rays = source.generate(batch, self.rng)
+                # source.generate() spreads the source's whole total_flux over
+                # the rays it is asked for, so a batched source would re-emit
+                # the full flux once per batch. Rescale to this batch's share
+                # of the source's ray budget. A no-op when batch == the budget.
+                if batch != source_num_rays:
+                    rays.flux = rays.flux * (batch / source_num_rays)
                 # Ensure all physics arrays are torch tensors.  Sources
                 # produce numpy arrays by default; NumPy 2.0 disallows
                 # mixed numpy/torch arithmetic, so we promote upfront.

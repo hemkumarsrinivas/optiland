@@ -1,6 +1,6 @@
 """Tests for the NSQ refactor: compound components, registries, and visualization.
 
-Covers spec §9 testing requirements:
+Covers:
 - ComponentRegistry (add, remove, get, surfaces flat-list)
 - Lens._build(): sub-surfaces, CS offsets, rim creation, SurfaceConfig overrides
 - CylindricalFrustumGeometry and AnnularPlaneGeometry intersection
@@ -34,7 +34,7 @@ from optiland.nonsequential.components.configs import InteractionType
 from optiland.nonsequential.components.registry import ComponentRegistry
 
 # ---------------------------------------------------------------------------
-# § ComponentRegistry
+# ComponentRegistry
 # ---------------------------------------------------------------------------
 
 
@@ -125,7 +125,7 @@ class TestComponentRegistry:
 
 
 # ---------------------------------------------------------------------------
-# § Lens._build()
+# Lens._build()
 # ---------------------------------------------------------------------------
 
 
@@ -202,7 +202,9 @@ class TestLensBuild:
             thickness=5,
             material=VACUUM,
             front_aperture_radius=10,
-            front=SurfaceConfig(interaction=InteractionType.REFLECTIVE),
+            front=SurfaceConfig(
+                interaction=InteractionType.REFLECTIVE, reflectance=1.0
+            ),
         )
         lens = Lens("L", cs, cfg)
         assert isinstance(lens.surfaces[0], ReflectiveComponent)
@@ -220,7 +222,7 @@ class TestLensBuild:
 
 
 # ---------------------------------------------------------------------------
-# § CylindricalFrustumGeometry intersection
+# CylindricalFrustumGeometry intersection
 # ---------------------------------------------------------------------------
 
 
@@ -232,7 +234,7 @@ class TestCylindricalFrustumGeometry:
         )
         origins = np.array([[0.0, 0.0, -5.0]])
         directions = np.array([[0.0, 0.0, 1.0]])
-        t, _, hit = geom.ray_intersect(origins, directions)
+        t, _, hit, _ = geom.ray_intersect(origins, directions)
         assert not hit[0]
 
     def test_radial_ray_hits(self):
@@ -242,7 +244,7 @@ class TestCylindricalFrustumGeometry:
         # Ray starts outside (+x side) aimed at -x, at z=5 (mid-height)
         origins = np.array([[20.0, 0.0, 5.0]])
         directions = np.array([[-1.0, 0.0, 0.0]])
-        t, normals, hit = geom.ray_intersect(origins, directions)
+        t, normals, hit, n_geom = geom.ray_intersect(origins, directions)
         assert hit[0]
         np.testing.assert_allclose(t[0], 15.0, atol=1e-4)
 
@@ -253,7 +255,7 @@ class TestCylindricalFrustumGeometry:
         )
         origins = np.array([[20.0, 0.0, 8.0]])  # z=8 > z_back=5
         directions = np.array([[-1.0, 0.0, 0.0]])
-        t, _, hit = geom.ray_intersect(origins, directions)
+        t, _, hit, _ = geom.ray_intersect(origins, directions)
         assert not hit[0]
 
     def test_normal_points_outward(self):
@@ -262,13 +264,13 @@ class TestCylindricalFrustumGeometry:
         geom = CylindricalFrustumGeometry(r_front=r, r_back=r, z_front=0.0, z_back=10.0)
         origins = np.array([[20.0, 0.0, 5.0]])
         directions = np.array([[-1.0, 0.0, 0.0]])
-        t, normals, hit = geom.ray_intersect(origins, directions)
+        t, normals, hit, n_geom = geom.ray_intersect(origins, directions)
         # Normal should face the incoming ray (+x side), so nx > 0
         assert normals[0, 0] > 0.9
 
 
 # ---------------------------------------------------------------------------
-# § AnnularPlaneGeometry intersection
+# AnnularPlaneGeometry intersection
 # ---------------------------------------------------------------------------
 
 
@@ -278,7 +280,7 @@ class TestAnnularPlaneGeometry:
         geom = AnnularPlaneGeometry(inner_radius=3.0, outer_radius=8.0, z_offset=5.0)
         origins = np.array([[5.0, 0.0, 0.0]])
         directions = np.array([[0.0, 0.0, 1.0]])
-        t, normals, hit = geom.ray_intersect(origins, directions)
+        t, normals, hit, n_geom = geom.ray_intersect(origins, directions)
         assert hit[0]
         np.testing.assert_allclose(t[0], 5.0, atol=1e-9)
 
@@ -287,7 +289,7 @@ class TestAnnularPlaneGeometry:
         geom = AnnularPlaneGeometry(inner_radius=3.0, outer_radius=8.0, z_offset=5.0)
         origins = np.array([[1.0, 0.0, 0.0]])  # r=1 < inner_radius=3
         directions = np.array([[0.0, 0.0, 1.0]])
-        t, _, hit = geom.ray_intersect(origins, directions)
+        t, _, hit, _ = geom.ray_intersect(origins, directions)
         assert not hit[0]
 
     def test_ray_outside_outer_radius_misses(self):
@@ -295,7 +297,7 @@ class TestAnnularPlaneGeometry:
         geom = AnnularPlaneGeometry(inner_radius=3.0, outer_radius=8.0, z_offset=5.0)
         origins = np.array([[10.0, 0.0, 0.0]])  # r=10 > outer_radius=8
         directions = np.array([[0.0, 0.0, 1.0]])
-        t, _, hit = geom.ray_intersect(origins, directions)
+        t, _, hit, _ = geom.ray_intersect(origins, directions)
         assert not hit[0]
 
     def test_parallel_ray_misses(self):
@@ -303,7 +305,7 @@ class TestAnnularPlaneGeometry:
         geom = AnnularPlaneGeometry(inner_radius=3.0, outer_radius=8.0, z_offset=5.0)
         origins = np.array([[5.0, 0.0, 0.0]])
         directions = np.array([[1.0, 0.0, 0.0]])
-        t, _, hit = geom.ray_intersect(origins, directions)
+        t, _, hit, _ = geom.ray_intersect(origins, directions)
         assert not hit[0]
 
     def test_normal_direction(self):
@@ -311,12 +313,12 @@ class TestAnnularPlaneGeometry:
         geom = AnnularPlaneGeometry(inner_radius=3.0, outer_radius=8.0, z_offset=5.0)
         origins = np.array([[5.0, 0.0, 0.0]])
         directions = np.array([[0.0, 0.0, 1.0]])  # incoming from -z
-        t, normals, hit = geom.ray_intersect(origins, directions)
+        t, normals, hit, n_geom = geom.ray_intersect(origins, directions)
         assert normals[0, 2] < 0.0  # normal faces -z (opposes incoming)
 
 
 # ---------------------------------------------------------------------------
-# § NSQScene new API
+# NSQScene new API
 # ---------------------------------------------------------------------------
 
 
@@ -333,7 +335,9 @@ class TestNSQSceneNewAPI:
     def test_add_mirror(self):
         scene = NSQScene()
         cs = CoordinateSystem(z=100)
-        cfg = MirrorConfig(radius=200.0, conic=-1.0, aperture_radius=50.0)
+        cfg = MirrorConfig(
+            radius=200.0, reflectance=1.0, conic=-1.0, aperture_radius=50.0
+        )
         scene.add_mirror("M1", cs, cfg)
         assert len(scene.surfaces) == 1
 
@@ -369,7 +373,7 @@ class TestNSQSceneNewAPI:
 
 
 # ---------------------------------------------------------------------------
-# § Backward-compatibility: old flat-list API
+# Backward-compatibility: old flat-list API
 # ---------------------------------------------------------------------------
 
 
@@ -384,7 +388,7 @@ class TestBackwardCompat:
 
         cs = CoordinateSystem(z=50)
         comp = ReflectiveComponent(
-            cs=cs, geometry=FinitePlaneGeometry(width=20, height=20)
+            cs=cs, geometry=FinitePlaneGeometry(width=20, height=20), reflectance=1.0
         )
         scene = NSQScene()
         scene.add_component("mirror", comp)
@@ -415,7 +419,7 @@ class TestBackwardCompat:
 
 
 # ---------------------------------------------------------------------------
-# § Integration test: biconvex lens scene
+# Integration test: biconvex lens scene
 # ---------------------------------------------------------------------------
 
 
@@ -468,7 +472,7 @@ class TestLensIntegration:
 
 
 # ---------------------------------------------------------------------------
-# § Visualization smoke tests
+# Visualization smoke tests
 # ---------------------------------------------------------------------------
 
 

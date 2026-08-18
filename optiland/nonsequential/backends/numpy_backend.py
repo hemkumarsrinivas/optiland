@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from optiland.nonsequential.backends.array_backend import ArrayBackend
+from optiland.nonsequential.rng import NSQRng
 
 if TYPE_CHECKING:
     from optiland.nonsequential.components.base import BaseComponent
@@ -27,7 +28,7 @@ class NumpyBackend(ArrayBackend):
     :meth:`intersect_scene` and RNG.
 
     Attributes:
-        rng: NumPy random generator.
+        rng: Keyed PCG32 RNG (see :mod:`optiland.nonsequential.rng`).
         seed: RNG seed stored for internal use.
     """
 
@@ -38,13 +39,13 @@ class NumpyBackend(ArrayBackend):
             seed: Optional random seed for reproducibility.
         """
         self.seed = seed
-        self.rng = np.random.default_rng(seed)
+        self.rng = NSQRng(seed)
 
     def intersect_scene(
         self,
         rays: NSQRayBundle,
         components: list[BaseComponent],
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Find nearest intersection of each ray with all scene components.
 
         Args:
@@ -52,32 +53,23 @@ class NumpyBackend(ArrayBackend):
             components: List of scene components.
 
         Returns:
-            ``(t_min, hit_normals, component_indices)``.
+            ``(t_min, hit_normals, component_indices, hit_n_geom)``.
         """
         N = rays.num_rays
         t_min = np.full(N, np.inf)
         hit_normals = np.zeros((N, 3))
+        hit_n_geom = np.zeros((N, 3))
         comp_indices = np.full(N, -1, dtype=np.int32)
 
         for i, comp in enumerate(components):
-            t_c, normals_c, hit_c = comp.intersect(rays)
+            t_c, normals_c, hit_c, n_geom_c = comp.intersect(rays)
             better = hit_c & (t_c < t_min)
             t_min = np.where(better, t_c, t_min)
             hit_normals = np.where(better[:, None], normals_c, hit_normals)
+            hit_n_geom = np.where(better[:, None], n_geom_c, hit_n_geom)
             comp_indices = np.where(better, i, comp_indices)
 
-        return t_min, hit_normals, comp_indices
-
-    def random_uniform(self, shape: tuple[int, ...]) -> np.ndarray:
-        """Generate uniform random numbers using the internal RNG.
-
-        Args:
-            shape: Shape of the output array.
-
-        Returns:
-            NumPy array of uniform random numbers in [0, 1).
-        """
-        return self.rng.random(shape)
+        return t_min, hit_normals, comp_indices, hit_n_geom
 
     def _maybe_compact(self, rays: NSQRayBundle) -> NSQRayBundle:
         """Compact dead rays after every bounce for the NumPy fast path.

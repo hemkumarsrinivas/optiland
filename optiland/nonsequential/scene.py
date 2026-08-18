@@ -63,6 +63,15 @@ class NSQScene:
         self.component_registry = ComponentRegistry()
         self.source_registry = SourceRegistry()
         self.detector_registry = DetectorRegistry()
+        # Rare-path sampling policy: importance biasing, bounded
+        # splitting (NumPy forward engine only), and Russian roulette. The
+        # default reproduces the engine's pre-PR11 behaviour exactly -- see
+        # optiland.nonsequential.ir.scene_ir.SamplingPolicy.
+        from optiland.nonsequential.ir.scene_ir import (  # noqa: PLC0415
+            SamplingPolicy,
+        )
+
+        self.sampling_policy = SamplingPolicy()
 
     @property
     def surfaces(self) -> list[BaseComponent]:
@@ -245,20 +254,31 @@ class NSQScene:
         batch_size: int = DEFAULT_BATCH_SIZE,
         seed: int | None = None,
         backend: TracerBackend | None = None,
-        record_paths: bool = False,
+        record_paths: bool | int = False,
     ) -> SimulationResult:
         """Run the Monte Carlo simulation and return results.
 
         Args:
             num_rays: Total rays to launch.
             max_depth: Maximum surface hits per ray.
-            min_flux_fraction: Kill threshold relative to per-ray initial flux.
+            min_flux_fraction: Russian-roulette threshold, relative to
+                per-ray initial flux -- combined with the scene's
+                ``sampling_policy.rr_start_flux`` (the larger of the two
+                wins). Below threshold, rays are killed with an unbiased
+                probability and survivors' flux is boosted accordingly,
+                rather than truncated outright.
             batch_size: Rays per processing batch. Does not change the result,
                 only the speed; see ``DEFAULT_BATCH_SIZE``.
             seed: RNG seed.
             backend: TracerBackend to use. Defaults to NumpyBackend or
                 TorchBackend based on the active ``optiland.backend``.
-            record_paths: If True, tracks node points of bouncing rays.
+            record_paths: ``False`` (default) records nothing. ``True``
+                records every ray's full path. A positive ``int`` records
+                an approximately that-many-ray subset, selected
+                deterministically by ``ray_id`` hash, so a
+                large trace stays cheap while still yielding a bounded
+                sample for visualization/diagnosis, e.g.
+                ``scene.trace(num_rays=10_000_000, record_paths=1_000)``.
 
         Returns:
             SimulationResult with per-detector results and statistics.
@@ -377,6 +397,45 @@ class NSQScene:
             raise ValueError("Scene has no detectors. Add at least one detector.")
 
 
+def _resolve_total_flux(config) -> float:
+    """Resolve a source config's radiometric flux [W].
+
+    ``total_flux_lumens``, when set, takes precedence over ``total_flux``
+    and is converted to watts via
+    :func:`optiland.nonsequential.units.lumens_to_watts` using the config's
+    own spectrum -- NSQ's trace loop is radiometric throughout, so this
+    conversion happens once, here, at scene-construction time.
+
+    Args:
+        config: A source config with ``total_flux``, ``total_flux_lumens``,
+            and ``spectrum`` attributes.
+
+    Returns:
+        Radiometric flux [W].
+
+    Raises:
+        ValueError: If ``total_flux_lumens`` is set and ``spectrum`` has
+            negligible overlap with the visible band (guardrail).
+    """
+    lumens = getattr(config, "total_flux_lumens", None)
+    if lumens is None:
+        return config.total_flux
+
+    if config.total_flux != 1.0:
+        import warnings  # noqa: PLC0415
+
+        warnings.warn(
+            f"{type(config).__name__} was given both total_flux="
+            f"{config.total_flux!r} and total_flux_lumens={lumens!r}; "
+            "total_flux_lumens takes precedence and total_flux is ignored.",
+            stacklevel=3,
+        )
+
+    from optiland.nonsequential.units import lumens_to_watts  # noqa: PLC0415
+
+    return lumens_to_watts(lumens, config.spectrum)
+
+
 def _build_source(cs: CoordinateSystem, config) -> object:
     """Instantiate a BaseNSQSource from a config dataclass.
 
@@ -406,7 +465,7 @@ def _build_source(cs: CoordinateSystem, config) -> object:
         return PointSource(
             cs=cs,
             spectrum=config.spectrum,
-            total_flux=config.total_flux,
+            total_flux=_resolve_total_flux(config),
             half_angle_deg=config.half_angle_deg,
             medium=getattr(config, "medium", None),
         )
@@ -414,7 +473,7 @@ def _build_source(cs: CoordinateSystem, config) -> object:
         return CollimatedSource(
             cs=cs,
             spectrum=config.spectrum,
-            total_flux=config.total_flux,
+            total_flux=_resolve_total_flux(config),
             aperture_radius=config.aperture_radius,
             profile=config.profile,
             gaussian_sigma=config.gaussian_sigma,
@@ -424,7 +483,7 @@ def _build_source(cs: CoordinateSystem, config) -> object:
         return ExtendedSource(
             cs=cs,
             spectrum=config.spectrum,
-            total_flux=config.total_flux,
+            total_flux=_resolve_total_flux(config),
             width=config.width,
             height=config.height,
             aperture_radius=config.aperture_radius,
@@ -479,6 +538,7 @@ def _build_detector(cs: CoordinateSystem, config) -> object:
             num_pixels_y=config.num_pixels_y,
             splat=config.splat,
             splat_sigma=config.splat_sigma,
+            absorb=config.absorb,
         )
     if isinstance(config, SpectralDetectorConfig):
         wl_bins = be.linspace(config.wl_min, config.wl_max, config.num_bins + 1)
@@ -491,6 +551,7 @@ def _build_detector(cs: CoordinateSystem, config) -> object:
             wavelength_bins=wl_bins,
             splat=config.splat,
             splat_sigma=config.splat_sigma,
+            absorb=config.absorb,
         )
     if isinstance(config, FarFieldDetectorConfig):
         return FarFieldDetector(
@@ -498,6 +559,7 @@ def _build_detector(cs: CoordinateSystem, config) -> object:
             theta_max_deg=90.0,
             num_bins_theta=config.num_theta,
             num_bins_phi=config.num_phi,
+            absorb=config.absorb,
         )
     if isinstance(config, RayDatabaseConfig):
         from optiland.nonsequential.components.geometry.analytic.plane import (  # noqa: PLC0415
@@ -508,5 +570,11 @@ def _build_detector(cs: CoordinateSystem, config) -> object:
         return RayDatabaseDetector(
             cs=cs,
             geometry=geometry,
+            # 0 ("unlimited", the config default) maps to RayDatabaseDetector's
+            # own None-means-unlimited convention (this was
+            # previously accepted and silently dropped -- the circular-buffer
+            # limit never took effect).
+            max_rays=config.max_rays if config.max_rays > 0 else None,
+            absorb=config.absorb,
         )
     raise TypeError(f"Unrecognised detector config type: {type(config).__name__}.")

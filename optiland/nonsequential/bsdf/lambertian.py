@@ -7,11 +7,17 @@ Kramer Harrison, 2026
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 
 import optiland.backend as be
 from optiland.backend.utils import to_numpy
 from optiland.nonsequential.bsdf.base import BaseBSDF
+from optiland.nonsequential.rng import EventSlot
+
+if TYPE_CHECKING:
+    from optiland.nonsequential.rng import NSQRng
 
 
 class LambertianBSDF(BaseBSDF):
@@ -19,17 +25,28 @@ class LambertianBSDF(BaseBSDF):
 
     Attributes:
         reflectance_value: Hemispherical diffuse reflectance in [0, 1].
+        transmissive_fraction: Probability in [0, 1] that a given scatter
+            event samples the *transmissive* hemisphere (the far side of the
+            surface, e.g. a ground-glass diffuser) instead of the
+            reflective one. Defaults to 0.0: a pure diffuse reflector,
+            identical to this class's behaviour before D-5.
     """
 
-    def __init__(self, reflectance_value: float = 1.0) -> None:
+    def __init__(
+        self, reflectance_value: float = 1.0, transmissive_fraction: float = 0.0
+    ) -> None:
         """Initialize LambertianBSDF.
 
         Args:
             reflectance_value: Total hemispherical reflectance in [0, 1].
                 May be a torch Tensor with requires_grad=True for autograd.
+            transmissive_fraction: Probability in [0, 1] that a scatter
+                event lands in the transmissive hemisphere rather than the
+                reflective one.
         """
         # Intentionally not float()-cast so torch tensors remain attached.
         self.reflectance_value = reflectance_value
+        self.transmissive_fraction = float(transmissive_fraction)
 
     def sample(
         self,
@@ -37,31 +54,45 @@ class LambertianBSDF(BaseBSDF):
         incident_dirs: np.ndarray,
         normals: np.ndarray,
         wavelengths: np.ndarray,
-        rng: np.random.Generator | None = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Sample cosine-weighted hemisphere directions around normals.
+        rng: NSQRng,
+        ray_id: np.ndarray,
+        bounce: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Sample cosine-weighted hemisphere directions around +/- normals.
 
         Uses Malley's method: sample uniform disk, project to hemisphere.
-        Sampling is detached (numpy RNG); weights are plain scalars.
+        A per-ray draw against :attr:`transmissive_fraction` picks
+        whether that hemisphere is centred on ``normals`` (reflective) or
+        ``-normals`` (transmissive). Sampling is detached (keyed PCG32);
+        weights are plain scalars.
 
         Args:
             num_rays: Number of rays.
             incident_dirs: Incident directions, shape (N, 3).
             normals: Surface normals, shape (N, 3), pointing toward ray side.
             wavelengths: Wavelengths [µm], shape (N,).
-            rng: NumPy random generator.
+            rng: Keyed PCG32 RNG.
+            ray_id: Per-ray identifiers, shape (N,).
+            bounce: Per-ray bounce/step index, shape (N,).
 
         Returns:
-            (scattered_dirs, flux_weights) with flux_weights = reflectance.
+            (scattered_dirs, flux_weights, transmitted); flux_weights =
+            reflectance_value for every ray (the lobe redistributes energy
+            within whichever hemisphere it lands in, it does not remove it).
         """
-        if rng is None:
-            rng = np.random.default_rng()
-
         # Sampling is inherently stochastic/detached -- use numpy throughout
         normals_np = np.asarray(to_numpy(normals), dtype=np.float64)
 
-        r1 = rng.random(num_rays)
-        r2 = rng.random(num_rays)
+        if self.transmissive_fraction > 0.0:
+            u_lobe = rng.uniform(ray_id, bounce, EventSlot.BSDF_LOBE_BRANCH)
+            transmitted_np = u_lobe < self.transmissive_fraction
+            hemisphere_np = np.where(transmitted_np[:, None], -normals_np, normals_np)
+        else:
+            transmitted_np = np.zeros(normals_np.shape[0], dtype=bool)
+            hemisphere_np = normals_np
+
+        r1 = rng.uniform(ray_id, bounce, EventSlot.BSDF_U1)
+        r2 = rng.uniform(ray_id, bounce, EventSlot.BSDF_U2)
 
         # Malley's method
         phi = 2.0 * np.pi * r1
@@ -72,9 +103,11 @@ class LambertianBSDF(BaseBSDF):
         ly = sin_theta * np.sin(phi)
         lz = cos_theta
 
-        t_vec, b_vec = _orthonormal_basis(normals_np)
+        t_vec, b_vec = _orthonormal_basis(hemisphere_np)
 
-        scattered = lx[:, None] * t_vec + ly[:, None] * b_vec + lz[:, None] * normals_np
+        scattered = (
+            lx[:, None] * t_vec + ly[:, None] * b_vec + lz[:, None] * hemisphere_np
+        )
         norms = (scattered * scattered).sum(axis=1, keepdims=True) ** 0.5
         scattered = scattered / norms
 
@@ -84,7 +117,7 @@ class LambertianBSDF(BaseBSDF):
         # reflectance_value is a torch Tensor with requires_grad=True.
         weights_be = be.ones(num_rays) * self.reflectance_value
 
-        return scattered_be, weights_be
+        return scattered_be, weights_be, be.array(transmitted_np)
 
     def reflectance(
         self,

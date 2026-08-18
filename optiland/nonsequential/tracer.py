@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from optiland.nonsequential._utils import DEFAULT_BATCH_SIZE
+from optiland.nonsequential.diagnostics import Diagnostics
 
 if TYPE_CHECKING:
     from optiland.nonsequential.backends.base import TracerBackend
@@ -32,12 +33,23 @@ class SimulationResult:
         total_flux_in: Total flux launched by all sources [W].
         total_flux_detected: Total flux recorded on all detectors [W].
         total_flux_absorbed: Flux absorbed by AbsorbingComponents [W].
+        total_flux_bulk_absorbed: Flux lost to Beer-Lambert bulk absorption
+            while travelling through an absorbing medium (k > 0),
+            e.g. tinted glass -- distinct from ``total_flux_absorbed``,
+            which is surface (AbsorbingComponent) absorption only [W].
         total_flux_escaped: Flux carried by escaped rays [W].
         total_flux_lost: Flux lost to flux/depth kill [W].
         flux_conservation_error:
-            ``|flux_in - detected - absorbed - escaped| / flux_in``.
+            ``|flux_in - detected - absorbed - bulk_absorbed - escaped
+            - lost| / flux_in``.
         trace_time_sec: Wall-clock time for the trace [s].
-        ray_paths: Optional per-ray event log dict (if record_paths=True).
+        ray_paths: Optional per-ray event log dict (``{"events":
+            structured_array}``), populated when ``record_paths`` is
+            truthy -- see :mod:`optiland.nonsequential.path_recording`.
+        diagnostics: Self-diagnosing summary of this trace --
+            depth truncation, roulette loss, unreached geometry, per
+            -detector sampling quality, and a threshold-based warning list.
+            See :meth:`report` and :mod:`optiland.nonsequential.diagnostics`.
     """
 
     detectors: dict[str, object] = field(default_factory=dict)
@@ -49,11 +61,39 @@ class SimulationResult:
     total_flux_in: float = 0.0
     total_flux_detected: float = 0.0
     total_flux_absorbed: float = 0.0
+    total_flux_bulk_absorbed: float = 0.0
     total_flux_escaped: float = 0.0
     total_flux_lost: float = 0.0
     flux_conservation_error: float = 0.0
     trace_time_sec: float = 0.0
     ray_paths: dict | None = None
+    diagnostics: Diagnostics = field(default_factory=Diagnostics)
+
+    def report(self) -> str:
+        """Full human-readable diagnostic report for this trace.
+
+        Returns:
+            A multi-line string -- see :meth:`Diagnostics.report`.
+        """
+        return self.diagnostics.report()
+
+    def __repr__(self) -> str:
+        """Concise summary instead of dumping every detector/array field.
+
+        Includes a warning count so a warning-bearing result is visible
+        even when only skimmed in a REPL or notebook cell -- call
+        :meth:`report` for the full diagnostic text.
+        """
+        n_warnings = len(self.diagnostics.warnings())
+        warn_note = f", {n_warnings} diagnostic warning(s)" if n_warnings else ""
+        return (
+            f"SimulationResult(num_rays_total={self.num_rays_total}, "
+            f"detectors={list(self.detectors)}, "
+            f"total_flux_in={self.total_flux_in:.6g}, "
+            f"total_flux_detected={self.total_flux_detected:.6g}, "
+            f"flux_conservation_error={self.flux_conservation_error:.3e}"
+            f"{warn_note})"
+        )
 
 
 class NSQTracer:
@@ -97,7 +137,7 @@ class NSQTracer:
         batch_size: int = DEFAULT_BATCH_SIZE,
         seed: int | None = None,
         backend: TracerBackend | None = None,
-        record_paths: bool = False,
+        record_paths: bool | int = False,
     ) -> SimulationResult:
         """Run the simulation and return results.
 
@@ -113,7 +153,11 @@ class NSQTracer:
             backend: Backend override. Uses constructor backend if not given.
                 Auto-selects from active ``optiland.backend`` if neither
                 is provided.
-            record_paths: If True, tracks node points of bouncing rays.
+            record_paths: ``False`` records nothing, ``True`` records every
+                ray's path, and a positive ``int`` records an approximately
+                that-many-ray subset selected deterministically by
+                ``ray_id`` hash -- see
+                :mod:`optiland.nonsequential.path_recording`.
 
         Returns:
             SimulationResult.

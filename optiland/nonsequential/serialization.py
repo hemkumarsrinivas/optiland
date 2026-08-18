@@ -6,9 +6,16 @@ JSON-serializable :class:`dict`.
 
 Schema version
 --------------
-The top-level key ``"nsq_schema_version"`` is set to ``1``.  The loader
-validates this value and raises :class:`ValueError` with an actionable message
-on mismatch.
+The top-level key ``"nsq_schema_version"`` is ``1``. NSQ has never been
+officially released, so there is exactly one schema and no compatibility or
+migration machinery for an earlier one: a file whose ``nsq_schema_version``
+does not match the current loader is refused with a generic mismatch error
+naming both versions. Since NSQ is still pre-release, the physics and the
+schema can both change without notice; a scene built against an older
+checkout should be rebuilt from its original construction code (or
+converted again via
+:func:`~optiland.nonsequential.convert.sequential_to_nonsequential`) against
+the current API.
 
 Tensor handling
 ---------------
@@ -292,12 +299,23 @@ def _serialize_component(name: str, compound: Any) -> dict:
         }
 
     if isinstance(compound, Mirror):
+        if not isinstance(config.reflectance, int | float) and not hasattr(
+            config.reflectance, "numpy"
+        ):
+            raise TypeError(
+                f"Cannot serialize mirror '{name}': reflectance is "
+                f"{type(config.reflectance).__name__}, not a constant. "
+                "Only a scalar reflectance round-trips through JSON "
+                "serialization; a callable or coating reflectance must be "
+                "re-attached after loading."
+            )
         return {
             "type": "mirror",
             "name": name,
             "cs": _serialize_cs(cs),
             "config": {
                 "radius": _to_float(config.radius),
+                "reflectance": _to_float(config.reflectance),
                 "conic": _to_float(config.conic),
                 "aperture_radius": _to_float(config.aperture_radius),
             },
@@ -367,6 +385,7 @@ def _deserialize_component(d: dict, scene: NSQScene) -> None:
     elif ctype == "mirror":
         config = MirrorConfig(
             radius=cfg_d["radius"],
+            reflectance=cfg_d["reflectance"],
             conic=cfg_d.get("conic", 0.0),
             aperture_radius=cfg_d["aperture_radius"],
         )
@@ -580,6 +599,7 @@ def _serialize_detector(name: str, detector: Any) -> dict:
             "num_pixels_y": int(detector.num_pixels_y),
             "splat": detector.splat,
             "splat_sigma": _to_float(detector.splat_sigma),
+            "absorb": bool(detector.absorb),
         }
 
     if isinstance(detector, SpectralDetector):
@@ -597,6 +617,7 @@ def _serialize_detector(name: str, detector: Any) -> dict:
             "num_bins": int(len(wl_bins) - 1),
             "splat": detector.splat,
             "splat_sigma": _to_float(detector.splat_sigma),
+            "absorb": bool(detector.absorb),
         }
 
     if isinstance(detector, FarFieldDetector):
@@ -606,6 +627,7 @@ def _serialize_detector(name: str, detector: Any) -> dict:
             "cs": cs_d,
             "num_bins_theta": int(detector.num_bins_theta),
             "num_bins_phi": int(detector.num_bins_phi),
+            "absorb": bool(detector.absorb),
         }
 
     if isinstance(detector, RayDatabaseDetector):
@@ -617,6 +639,7 @@ def _serialize_detector(name: str, detector: Any) -> dict:
             "cs": cs_d,
             "width": float(getattr(geom, "width", 10.0)),
             "height": float(getattr(geom, "height", 10.0)),
+            "absorb": bool(detector.absorb),
         }
 
     raise TypeError(
@@ -655,6 +678,7 @@ def _deserialize_detector(d: dict, scene: NSQScene) -> None:
             num_pixels_y=d.get("num_pixels_y", 256),
             splat=d.get("splat", "bilinear"),
             splat_sigma=d.get("splat_sigma", 0.5),
+            absorb=d.get("absorb", True),
         )
         scene.add_detector(name, cs, config)
 
@@ -669,6 +693,7 @@ def _deserialize_detector(d: dict, scene: NSQScene) -> None:
             num_bins=d.get("num_bins", 100),
             splat=d.get("splat", "bilinear"),
             splat_sigma=d.get("splat_sigma", 0.5),
+            absorb=d.get("absorb", True),
         )
         scene.add_detector(name, cs, config)
 
@@ -676,6 +701,7 @@ def _deserialize_detector(d: dict, scene: NSQScene) -> None:
         config = FarFieldDetectorConfig(
             num_theta=d.get("num_bins_theta", 90),
             num_phi=d.get("num_bins_phi", 360),
+            absorb=d.get("absorb", True),
         )
         scene.add_detector(name, cs, config)
 
@@ -683,6 +709,7 @@ def _deserialize_detector(d: dict, scene: NSQScene) -> None:
         config = RayDatabaseConfig(
             width=d["width"],
             height=d["height"],
+            absorb=d.get("absorb", True),
         )
         scene.add_detector(name, cs, config)
 
@@ -749,7 +776,10 @@ def scene_from_dict(d: dict) -> NSQScene:
 
     Raises:
         ValueError: If ``"nsq_schema_version"`` is missing or does not match
-            :data:`NSQ_SCHEMA_VERSION`.
+            :data:`NSQ_SCHEMA_VERSION`. NSQ has never been officially
+            released, so there is no compatibility mode or auto-migration
+            for an older schema -- a mismatched file must be rebuilt against
+            the current API.
         ValueError: If any component/source/detector type is unknown.
     """
     from optiland.nonsequential.scene import NSQScene  # noqa: PLC0415

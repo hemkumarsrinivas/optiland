@@ -1,7 +1,7 @@
 """PR9 — NSQ gradient validation suite (the merge gate).
 
-Covers §9.3 (Type C — gradient correctness), §9.4 (backend cross-check),
-and §9.5 (performance smoke).
+Covers Type C (gradient correctness), backend cross-check, and
+performance smoke.
 
 Spec requirement: autograd gradients must match finite-difference gradients
 to within tol=0.02 relative error (MC + FD noise). Common-random-numbers
@@ -147,7 +147,7 @@ def _fd_gradient(
 
 
 # ---------------------------------------------------------------------------
-# § Type C.1 — Source flux gradient (linear case, zero MC noise)
+# Type C.1 — Source flux gradient (linear case, zero MC noise)
 # ---------------------------------------------------------------------------
 
 
@@ -218,7 +218,7 @@ class TestSourceFluxGradient:
 
 
 # ---------------------------------------------------------------------------
-# § Type C.2 — Lambertian BSDF reflectance gradient
+# Type C.2 — Lambertian BSDF reflectance gradient
 # ---------------------------------------------------------------------------
 
 
@@ -266,6 +266,7 @@ class TestBSDFReflectanceGradient:
             ReflectiveComponent(
                 cs=mirror_cs,
                 geometry=FinitePlaneGeometry(width=20.0, height=20.0),
+                reflectance=1.0,
                 bsdf=bsdf,
             ),
         )
@@ -310,6 +311,7 @@ class TestBSDFReflectanceGradient:
                 ReflectiveComponent(
                     cs=CoordinateSystem(z=5),
                     geometry=FinitePlaneGeometry(width=20.0, height=20.0),
+                    reflectance=1.0,
                     bsdf=LambertianBSDF(reflectance_value=float(r_val)),
                 ),
             )
@@ -347,6 +349,7 @@ class TestBSDFReflectanceGradient:
             ReflectiveComponent(
                 cs=CoordinateSystem(z=5),
                 geometry=FinitePlaneGeometry(width=20.0, height=20.0),
+                reflectance=1.0,
                 bsdf=bsdf,
             ),
         )
@@ -372,7 +375,7 @@ class TestBSDFReflectanceGradient:
 
 
 # ---------------------------------------------------------------------------
-# § Type C.3 — Visibility gradient is zero (v1 limitation)
+# Type C.3 — Visibility gradient is zero (v1 limitation)
 # ---------------------------------------------------------------------------
 
 
@@ -382,7 +385,7 @@ class TestVisibilityGradientZero:
     Moving a component laterally so it transitions from fully in-beam to
     fully out-of-beam produces a discontinuous jump in detected flux.
     The autograd gradient at any smooth interior point is zero because
-    the `argmin` over component t-values is detached (§3.2 of spec).
+    the `argmin` over component t-values is detached.
 
     This is the v1 documented limitation; reparameterization (roadmap #1)
     is required to fix this.
@@ -431,10 +434,12 @@ class TestVisibilityGradientZero:
 
         scene, _, _ = _build_mirror_scene()
         backend = TorchBackend(seed=0)
-        rays = scene.sources[0].generate(64, backend.rng)
+        rays = scene.sources[0].generate(np.arange(64), backend.rng)
         rays = backend._ensure_torch_bundle(rays)
 
-        t_min, normals, comp_indices = backend.intersect_scene(rays, scene.surfaces)
+        t_min, normals, comp_indices, n_geom = backend.intersect_scene(
+            rays, scene.surfaces
+        )
 
         # The dispatch index is a plain integer array: no grad_fn, so no
         # gradient can flow through the choice of surface.
@@ -448,7 +453,7 @@ class TestVisibilityGradientZero:
 
 
 # ---------------------------------------------------------------------------
-# § §9.4 — Backend cross-check (NumPy vs Torch forward agreement)
+# Backend cross-check (NumPy vs Torch forward agreement)
 # ---------------------------------------------------------------------------
 
 
@@ -548,7 +553,7 @@ class TestBackendCrossCheck:
 
 
 # ---------------------------------------------------------------------------
-# § §9.5 — Performance smoke
+# Performance smoke
 # ---------------------------------------------------------------------------
 
 
@@ -637,7 +642,7 @@ class TestPerfSmoke:
 
 
 # ---------------------------------------------------------------------------
-# § Type A — Analytic forward correctness (explicit, per §9.1)
+# Type A — Analytic forward correctness (explicit)
 # ---------------------------------------------------------------------------
 
 
@@ -661,7 +666,7 @@ class TestAnalyticForward:
         geom = FinitePlaneGeometry(width=100.0, height=100.0)
         origins = _np.array([[0.0, 0.0, -10.0]])
         directions = _np.array([[0.0, 0.0, 1.0]])
-        t, normals, hit = geom.ray_intersect(origins, directions)
+        t, normals, hit, n_geom = geom.ray_intersect(origins, directions)
 
         _np.testing.assert_allclose(t[0], 10.0, atol=1e-10)
         assert hit[0]

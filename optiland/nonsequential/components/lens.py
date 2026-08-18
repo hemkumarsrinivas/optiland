@@ -27,6 +27,7 @@ from optiland.nonsequential.components.geometry.analytic.frustum import (
 )
 from optiland.nonsequential.components.reflective import ReflectiveComponent
 from optiland.nonsequential.components.refractive import RefractiveComponent
+from optiland.nonsequential.components.volume import Volume
 from optiland.nonsequential.materials.nsq_material import VACUUM, NSQMaterial
 
 if TYPE_CHECKING:
@@ -45,11 +46,18 @@ class Lens(CompoundComponent):
     4. **Rim** -- annular plane, absorbing; only when
        ``front_aperture_radius != back_aperture_radius``.
 
+    The built surfaces are validated as a single closed :class:`Volume`
+    (watertight, consistently outward-oriented) at construction time --
+    a lens whose faces and edge do not actually close up raises
+    :class:`~optiland.nonsequential.components.volume.NonWatertightVolumeError`
+    immediately rather than producing silently wrong flux accounting later.
+
     Attributes:
         _name: Registry name.
         _cs: Front-vertex coordinate system.
         _config: LensConfig describing the lens geometry.
         _surfaces: Built list of sub-surfaces.
+        _volume: The validated :class:`Volume` these surfaces form.
     """
 
     def __init__(
@@ -64,11 +72,17 @@ class Lens(CompoundComponent):
             name: Unique identifier for this lens in the registry.
             cs: Coordinate system for the front vertex.
             config: Lens geometry and material configuration.
+
+        Raises:
+            NonWatertightVolumeError: If the built surfaces do not form a
+                closed, consistently outward-oriented solid.
         """
         self._name = name
         self._cs = cs
         self._config = config
+        mat = _resolve_material(config.material)
         self._surfaces: list[BaseComponent] = self._build()
+        self._volume = Volume(name=name, boundary=self._surfaces, interior=mat)
 
     @property
     def name(self) -> str:
@@ -283,6 +297,7 @@ def _make_surface(
     cfg: SurfaceConfig | None,
     interaction: InteractionType,
     name: str = "",
+    reflectance: object | None = None,
 ) -> BaseComponent:
     """Construct the correct BaseComponent from config overrides.
 
@@ -294,9 +309,17 @@ def _make_surface(
         cfg: Optional SurfaceConfig with overrides.
         interaction: Default interaction type.
         name: Label for this sub-surface, e.g. ``"L1.front"``.
+        reflectance: Compound-level reflectance (e.g. ``MirrorConfig
+            .reflectance``), used when this surface resolves to
+            ``InteractionType.REFLECTIVE`` and ``cfg.reflectance`` does not
+            override it. Ignored for non-reflective surfaces.
 
     Returns:
         The constructed BaseComponent subclass.
+
+    Raises:
+        ValueError: If the surface resolves to REFLECTIVE and neither
+            ``cfg.reflectance`` nor ``reflectance`` supplies a value.
     """
     resolved = _resolve_interaction(cfg, interaction)
     bsdf = cfg.bsdf if cfg is not None else None
@@ -306,6 +329,7 @@ def _make_surface(
         geom.aperture_radius = as_param(aperture_override)
 
     if resolved == InteractionType.REFRACTIVE:
+        coating = cfg.coating if cfg is not None else None
         return RefractiveComponent(
             cs,
             geom,
@@ -314,12 +338,24 @@ def _make_surface(
             bsdf=bsdf,
             name=name,
             scatter_fraction=scatter_fraction,
+            coating=coating,
         )
     if resolved == InteractionType.REFLECTIVE:
-        # ReflectiveComponent: (cs, geometry, bsdf=None, material_front=VACUUM)
+        surface_reflectance = cfg.reflectance if cfg is not None else None
+        if surface_reflectance is None:
+            surface_reflectance = reflectance
+        if surface_reflectance is None:
+            raise ValueError(
+                f"Surface {name!r} resolves to InteractionType.REFLECTIVE but "
+                "no reflectance was supplied. Set MirrorConfig.reflectance "
+                "(or this surface's SurfaceConfig.reflectance) to a constant, "
+                "a callable(wavelength_um) -> reflectance, or an unpolarized "
+                "optiland.coatings.BaseCoating."
+            )
         return ReflectiveComponent(
             cs,
             geom,
+            surface_reflectance,
             bsdf=bsdf,
             material_front=mat_front,
             name=name,

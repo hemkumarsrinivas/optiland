@@ -1,7 +1,6 @@
 """Basic non-sequential raytracing tests.
 
-Covers analytic reference cases from the spec (§16.1) and flux
-conservation (§16.2).
+Covers analytic reference cases and flux conservation.
 
 Kramer Harrison, 2026
 """
@@ -22,6 +21,7 @@ from optiland.nonsequential import (
     IrradianceDetector,
     IrradianceDetectorConfig,
     LensConfig,
+    NSQRng,
     NSQScene,
     NSQTracer,
     PointSource,
@@ -45,23 +45,25 @@ def numpy_backend():
 
 
 # ---------------------------------------------------------------------------
-# § Test: Spectrum sampling
+# Test: Spectrum sampling
 # ---------------------------------------------------------------------------
 
 
 class TestSpectrum:
     def test_monochromatic(self):
         spec = Spectrum.monochromatic(0.55)
-        rng = np.random.default_rng(0)
-        wl = spec.sample(100, rng)
+        rng = NSQRng(0)
+        ray_id = np.arange(100)
+        wl = spec.sample(ray_id, np.zeros_like(ray_id), rng)
         assert np.all(wl == 0.55)
 
     def test_broadband_sampling(self):
         wls = np.array([0.4, 0.5, 0.6, 0.7])
         wts = np.array([1.0, 2.0, 2.0, 1.0])
         spec = Spectrum(wls, wts)
-        rng = np.random.default_rng(42)
-        samples = spec.sample(10000, rng)
+        rng = NSQRng(42)
+        ray_id = np.arange(10000)
+        samples = spec.sample(ray_id, np.zeros_like(ray_id), rng)
         assert set(np.round(samples, 5)).issubset(set(np.round(wls, 5)))
         # 0.5 and 0.6 µm should be sampled more than 0.4 and 0.7 µm
         counts = {w: int((np.isclose(samples, w)).sum()) for w in wls}
@@ -80,7 +82,7 @@ class TestSpectrum:
 
 
 # ---------------------------------------------------------------------------
-# § Test: Point source generation
+# Test: Point source generation
 # ---------------------------------------------------------------------------
 
 
@@ -89,8 +91,8 @@ class TestPointSource:
         cs = CoordinateSystem(x=0, y=0, z=0)
         spec = Spectrum.monochromatic(0.55)
         src = PointSource(cs=cs, spectrum=spec, total_flux=1.0, half_angle_deg=90.0)
-        rng = np.random.default_rng(0)
-        rays = src.generate(1000, rng)
+        rng = NSQRng(0)
+        rays = src.generate(np.arange(1000), rng)
         assert rays.num_rays == 1000
         assert rays.num_rays_alive == 1000
 
@@ -99,16 +101,16 @@ class TestPointSource:
         spec = Spectrum.monochromatic(0.55)
         total = 2.5
         src = PointSource(cs=cs, spectrum=spec, total_flux=total, half_angle_deg=90.0)
-        rng = np.random.default_rng(0)
-        rays = src.generate(10000, rng)
+        rng = NSQRng(0)
+        rays = src.generate(np.arange(10000), rng)
         assert np.isclose(rays.flux.sum(), total, rtol=1e-6)
 
     def test_directions_normalized(self):
         cs = CoordinateSystem(x=0, y=0, z=0)
         spec = Spectrum.monochromatic(0.55)
         src = PointSource(cs=cs, spectrum=spec, total_flux=1.0)
-        rng = np.random.default_rng(0)
-        rays = src.generate(500, rng)
+        rng = NSQRng(0)
+        rays = src.generate(np.arange(500), rng)
         dirs = np.stack([rays.L, rays.M, rays.N], axis=1)
         norms = np.linalg.norm(dirs, axis=1)
         np.testing.assert_allclose(norms, 1.0, atol=1e-12)
@@ -118,15 +120,15 @@ class TestPointSource:
         cs = CoordinateSystem(x=0, y=0, z=0)
         spec = Spectrum.monochromatic(0.55)
         src = PointSource(cs=cs, spectrum=spec, total_flux=1.0, half_angle_deg=30.0)
-        rng = np.random.default_rng(0)
-        rays = src.generate(1000, rng)
+        rng = NSQRng(0)
+        rays = src.generate(np.arange(1000), rng)
         cos_theta = rays.N  # +z axis
         min_cos = np.cos(np.radians(30.0))
         assert np.all(cos_theta >= min_cos - 1e-10)
 
 
 # ---------------------------------------------------------------------------
-# § Test: Plane geometry intersection
+# Test: Plane geometry intersection
 # ---------------------------------------------------------------------------
 
 
@@ -143,7 +145,7 @@ class TestPlaneGeometry:
         directions = np.zeros((N, 3))
         directions[:, 2] = 1.0  # pointing +z
 
-        t, normals, hit_mask = geom.ray_intersect(origins, directions)
+        t, normals, hit_mask, n_geom = geom.ray_intersect(origins, directions)
         assert hit_mask.all()
         np.testing.assert_allclose(t, 1.0, atol=1e-9)
 
@@ -155,7 +157,7 @@ class TestPlaneGeometry:
         geom = PlaneGeometry()
         origins = np.array([[0.0, 0.0, -1.0]])
         directions = np.array([[1.0, 0.0, 0.0]])  # parallel to plane
-        t, normals, hit_mask = geom.ray_intersect(origins, directions)
+        t, normals, hit_mask, n_geom = geom.ray_intersect(origins, directions)
         assert not hit_mask[0]
         assert t[0] == np.inf
 
@@ -168,17 +170,17 @@ class TestPlaneGeometry:
         # Ray hitting inside aperture
         o_in = np.array([[0.0, 0.0, -1.0]])
         d_in = np.array([[0.0, 0.0, 1.0]])
-        t, _, hit = geom.ray_intersect(o_in, d_in)
+        t, _, hit, _ = geom.ray_intersect(o_in, d_in)
         assert hit[0]
 
         # Ray hitting outside aperture
         o_out = np.array([[6.0, 0.0, -1.0]])
-        t, _, hit = geom.ray_intersect(o_out, d_in)
+        t, _, hit, _ = geom.ray_intersect(o_out, d_in)
         assert not hit[0]
 
 
 # ---------------------------------------------------------------------------
-# § Test: Sphere geometry intersection
+# Test: Sphere geometry intersection
 # ---------------------------------------------------------------------------
 
 
@@ -193,7 +195,7 @@ class TestSphereGeometry:
         # Ray from outside along -z hitting sphere
         origins = np.array([[0.0, 0.0, -20.0]])
         directions = np.array([[0.0, 0.0, 1.0]])
-        t, normals, hit = geom.ray_intersect(origins, directions)
+        t, normals, hit, n_geom = geom.ray_intersect(origins, directions)
         assert hit[0]
         np.testing.assert_allclose(t[0], 10.0, atol=1e-9)  # hits at z=-10
 
@@ -205,13 +207,13 @@ class TestSphereGeometry:
         geom = SphereGeometry(radius=5.0)
         origins = np.array([[0.0, 0.0, -10.0]])
         directions = np.array([[0.0, 0.0, 1.0]])
-        t, normals, hit = geom.ray_intersect(origins, directions)
+        t, normals, hit, n_geom = geom.ray_intersect(origins, directions)
         # Normal at (0, 0, -5) should point toward incoming ray (in -z direction)
         assert normals[0, 2] < 0  # points toward origin (incoming side)
 
 
 # ---------------------------------------------------------------------------
-# § Test: Flat mirror normal incidence (analytic reference case)
+# Test: Flat mirror normal incidence (analytic reference case)
 # ---------------------------------------------------------------------------
 
 
@@ -243,6 +245,7 @@ class TestFlatMirrorReflection:
         mirror = ReflectiveComponent(
             cs=mirror_cs,
             geometry=FinitePlaneGeometry(width=20.0, height=20.0),
+            reflectance=1.0,
             bsdf=SpecularBRDF(),
         )
 
@@ -281,7 +284,7 @@ class TestFlatMirrorReflection:
 
 
 # ---------------------------------------------------------------------------
-# § Test: Flux conservation
+# Test: Flux conservation
 # ---------------------------------------------------------------------------
 
 
@@ -353,6 +356,7 @@ class TestFluxConservation:
         mirror = ReflectiveComponent(
             cs=mirror_cs,
             geometry=ConicGeometry(radius=200.0, conic=-1.0, aperture_radius=50.0),
+            reflectance=1.0,
             bsdf=SpecularBRDF(),
         )
 
@@ -409,6 +413,7 @@ class TestFluxConservation:
         mirror = ReflectiveComponent(
             cs=mirror_cs,
             geometry=FinitePlaneGeometry(width=20.0, height=20.0),
+            reflectance=1.0,
             bsdf=SpecularBRDF(),
         )
 
@@ -441,7 +446,7 @@ class TestFluxConservation:
 
 
 # ---------------------------------------------------------------------------
-# § Test: Collimated source generation
+# Test: Collimated source generation
 # ---------------------------------------------------------------------------
 
 
@@ -452,8 +457,8 @@ class TestCollimatedSource:
         src = CollimatedSource(
             cs=cs, spectrum=spec, total_flux=1.0, aperture_radius=5.0
         )
-        rng = np.random.default_rng(0)
-        rays = src.generate(200, rng)
+        rng = NSQRng(0)
+        rays = src.generate(np.arange(200), rng)
         # All rays point in +z direction (no tilt in this CS)
         np.testing.assert_allclose(rays.L, 0.0, atol=1e-12)
         np.testing.assert_allclose(rays.M, 0.0, atol=1e-12)
@@ -464,14 +469,14 @@ class TestCollimatedSource:
         spec = Spectrum.monochromatic(0.55)
         r = 5.0
         src = CollimatedSource(cs=cs, spectrum=spec, total_flux=1.0, aperture_radius=r)
-        rng = np.random.default_rng(0)
-        rays = src.generate(500, rng)
+        rng = NSQRng(0)
+        rays = src.generate(np.arange(500), rng)
         radii = (rays.x**2 + rays.y**2) ** 0.5
         assert np.all(radii <= r + 1e-9)
 
 
 # ---------------------------------------------------------------------------
-# § Test: NSQScene validation
+# Test: NSQScene validation
 # ---------------------------------------------------------------------------
 
 
@@ -499,7 +504,7 @@ class TestNSQScene:
 
 
 # ---------------------------------------------------------------------------
-# § Test: BSDF
+# Test: BSDF
 # ---------------------------------------------------------------------------
 
 
@@ -523,9 +528,14 @@ class TestBSDFs:
         dirs = np.array([[0.0, 0.0, -1.0]])  # incoming downward
         normals = np.array([[0.0, 0.0, 1.0]])  # normal upward
         wl = np.array([0.55])
-        rng = np.random.default_rng(0)
-        scattered, weights = bsdf.sample(N, dirs, normals, wl, rng)
+        rng = NSQRng(0)
+        ray_id = np.arange(N)
+        bounce = np.zeros(N, dtype=np.int32)
+        scattered, weights, transmitted = bsdf.sample(
+            N, dirs, normals, wl, rng, ray_id, bounce
+        )
         np.testing.assert_allclose(scattered, [[0.0, 0.0, 1.0]], atol=1e-10)
+        assert not np.any(transmitted)
 
     def test_lambertian_reflectance(self):
         from optiland.nonsequential.bsdf.lambertian import (
@@ -550,8 +560,13 @@ class TestBSDFs:
         dirs = np.tile([0.0, 0.0, -1.0], (N, 1)).astype(float)
         normals = np.tile([0.0, 0.0, 1.0], (N, 1)).astype(float)
         wl = np.full(N, 0.55)
-        rng = np.random.default_rng(42)
-        scattered, weights = bsdf.sample(N, dirs, normals, wl, rng)
+        rng = NSQRng(42)
+        ray_id = np.arange(N)
+        bounce = np.zeros(N, dtype=np.int32)
+        scattered, weights, transmitted = bsdf.sample(
+            N, dirs, normals, wl, rng, ray_id, bounce
+        )
+        assert not np.any(transmitted)
         # All scattered rays should be on the +z hemisphere
         assert np.all(scattered[:, 2] >= -1e-6)
         # Check normalization
@@ -560,7 +575,7 @@ class TestBSDFs:
 
 
 # ---------------------------------------------------------------------------
-# § Test: New required tests per spec §11.2
+# Test: New required tests per spec
 # ---------------------------------------------------------------------------
 
 
@@ -577,7 +592,9 @@ class TestSelfIntersectionGuard:
         Spectrum.monochromatic(0.55)
         cs = CoordinateSystem(x=0, y=0, z=10)
         geom = FinitePlaneGeometry(width=20.0, height=20.0)
-        comp = ReflectiveComponent(cs=cs, geometry=geom, bsdf=SpecularBRDF())
+        comp = ReflectiveComponent(
+            cs=cs, geometry=geom, reflectance=1.0, bsdf=SpecularBRDF()
+        )
 
         # Create a ray bundle that is AT the surface (t would be 0 without guard)
         rays = NSQRayBundle(
@@ -594,7 +611,7 @@ class TestSelfIntersectionGuard:
             alive=np.array([True]),
         )
 
-        t, normals, hit_mask = comp.intersect(rays)
+        t, normals, hit_mask, n_geom = comp.intersect(rays)
         # With T_EPSILON guard, a ray at the surface should NOT register as a hit
         assert not hit_mask[0], "Ray at surface should not self-intersect"
         assert t[0] == np.inf
@@ -649,8 +666,8 @@ class TestWavelengthUm:
         src = CollimatedSource(
             cs=cs, spectrum=spec, total_flux=1.0, aperture_radius=1.0
         )
-        rng = np.random.default_rng(0)
-        rays = src.generate(100, rng)
+        rng = NSQRng(0)
+        rays = src.generate(np.arange(100), rng)
         # Wavelength should be ~0.55 µm (not 550 nm)
         assert np.all(rays.wavelength < 10.0), "Wavelengths appear to be in nm, not µm"
         np.testing.assert_allclose(rays.wavelength, 0.55, rtol=1e-10)
@@ -692,8 +709,11 @@ class TestAbsorbedCount:
         normals = np.zeros((N, 3))
         normals[:, 2] = -1.0
 
+        from optiland.nonsequential.ir.bsdf_ir import BsdfIR  # noqa: PLC0415
+
         rng = np.random.default_rng(0)
-        absorber.interact(rays, t, normals, hit_mask, rng)
+        n_geom = np.zeros((N, 3))
+        absorber.interact(rays, t, normals, hit_mask, rng, BsdfIR(kind="none"), n_geom)
 
         assert absorber._absorbed_count == 3
         assert absorber._absorbed_flux == pytest.approx(3.0)
@@ -807,12 +827,19 @@ class TestFluxBookkeeping:
         return scene
 
     def test_ledger_closes(self):
-        """detected + absorbed + escaped + lost must equal the launched flux."""
+        """detected + absorbed + bulk_absorbed + escaped + lost == launched.
+
+        N-BK7 has a small but nonzero extinction coefficient at 0.55 um, so
+        the lens's Beer-Lambert bulk absorption (D-13) is a real, nonzero
+        term in this ledger, not just a defensive zero-check.
+        """
         result = self._scene().trace(num_rays=20_000, seed=3)
+        assert result.total_flux_bulk_absorbed > 0.0
         balance = (
             result.total_flux_in
             - result.total_flux_detected
             - result.total_flux_absorbed
+            - result.total_flux_bulk_absorbed
             - result.total_flux_escaped
             - result.total_flux_lost
         )
@@ -880,8 +907,8 @@ class TestConicSurfaceNormals:
 class TestBatchingFluxInvariance:
     """Splitting a trace into batches must not change the launched energy.
 
-    ``source.generate(n)`` spreads the source's whole ``total_flux`` over the
-    ``n`` rays it is asked for. When the tracer processes a source in several
+    ``source.generate(ray_id)`` spreads the source's whole ``total_flux``
+    over the rays it is asked for. When the tracer processes a source in several
     batches, each batch therefore has to be rescaled to its share of the ray
     budget; otherwise every batch re-emits the full flux and the simulation
     manufactures energy in proportion to the batch count. This affects any run

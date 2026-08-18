@@ -20,6 +20,9 @@ class IrradianceDetectorConfig:
         num_pixels_y: Number of pixels along y.
         splat: Splatting mode — 'bilinear', 'gaussian', or 'hard'.
         splat_sigma: Gaussian splat sigma in pixels (used when splat='gaussian').
+        absorb: Whether a hit terminates the ray. False makes the detector
+            transmissive: the hit is recorded and the ray continues on its
+            unchanged direction, enabling mid-system beam sampling.
     """
 
     width: float
@@ -28,6 +31,7 @@ class IrradianceDetectorConfig:
     num_pixels_y: int = 256
     splat: Literal["bilinear", "gaussian", "hard"] = "bilinear"
     splat_sigma: float = 0.5
+    absorb: bool = True
 
 
 @dataclass
@@ -42,9 +46,11 @@ class SpectralDetectorConfig:
         wl_min: Minimum wavelength for spectral binning [µm].
         wl_max: Maximum wavelength for spectral binning [µm].
         num_bins: Number of wavelength bins.
-        splat: Splatting mode — 'bilinear', 'gaussian', or 'hard'.
-            Note: only 'hard' is currently implemented for SpectralDetector.
-        splat_sigma: Gaussian splat sigma in pixels (reserved for future use).
+        splat: Spatial (x, y) splatting mode — 'bilinear', 'gaussian', or
+            'hard'. The wavelength bin is always hard-assigned.
+        splat_sigma: Gaussian splat sigma in pixels (used when
+            ``splat='gaussian'``).
+        absorb: Whether a hit terminates the ray.
 
     Note:
         Wavelengths are in **micrometres**, matching ``Spectrum`` and every
@@ -61,6 +67,7 @@ class SpectralDetectorConfig:
     num_bins: int = 100
     splat: Literal["bilinear", "gaussian", "hard"] = "bilinear"
     splat_sigma: float = 0.5
+    absorb: bool = True
 
 
 @dataclass
@@ -70,10 +77,12 @@ class FarFieldDetectorConfig:
     Attributes:
         num_theta: Number of polar angle bins.
         num_phi: Number of azimuthal angle bins.
+        absorb: Whether a hit terminates the ray.
     """
 
     num_theta: int = 90
     num_phi: int = 360
+    absorb: bool = True
 
 
 @dataclass
@@ -84,8 +93,10 @@ class RayDatabaseConfig:
         width: Detector width [mm].
         height: Detector height [mm].
         max_rays: Maximum number of rays to store (0 = unlimited).
+        absorb: Whether a hit terminates the ray.
     """
 
     width: float
     height: float
     max_rays: int = 0
+    absorb: bool = True

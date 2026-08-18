@@ -11,13 +11,17 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 import optiland.backend as be
+from optiland.nonsequential._utils import as_param
 
 if TYPE_CHECKING:
     from optiland.coordinate_system import CoordinateSystem
     from optiland.nonsequential.bsdf.base import BaseBSDF
     from optiland.nonsequential.components.geometry.base import AABB, ComponentGeometry
+    from optiland.nonsequential.ir.bsdf_ir import BsdfIR
+    from optiland.nonsequential.ir.scene_ir import SamplingPolicy
     from optiland.nonsequential.materials.nsq_material import NSQMaterial
     from optiland.nonsequential.ray_bundle import NSQRayBundle
+    from optiland.nonsequential.rng import NSQRng
 
 
 class BaseComponent(ABC):
@@ -56,6 +60,12 @@ class BaseComponent(ABC):
             name: Optional label for this component.
             scatter_fraction: Probability that a ray striking this surface is
                 routed through ``bsdf`` instead of the specular path.
+                Differentiable: a ``torch.Tensor`` with
+                ``requires_grad=True`` stays attached to the autograd graph
+                -- see ``RefractiveComponent.interact``/
+                ``ReflectiveComponent.interact`` for the detached-sample /
+                attached-weight estimator that makes
+                ``d(flux)/d(scatter_fraction)`` correct rather than zero.
         """
         self.cs = cs
         self.geometry = geometry
@@ -63,11 +73,11 @@ class BaseComponent(ABC):
         self.material_back = material_back
         self.bsdf = bsdf
         self.name = name
-        self.scatter_fraction = float(scatter_fraction)
+        self.scatter_fraction = as_param(scatter_fraction)
 
     def intersect(
         self, rays: NSQRayBundle
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Find the nearest intersection of alive rays with this component.
 
         Transforms rays to local frame, delegates to geometry, then
@@ -77,10 +87,13 @@ class BaseComponent(ABC):
             rays: The ray bundle in global coordinates.
 
         Returns:
-            Tuple (t, normals, hit_mask) in global frame:
+            Tuple (t, normals, hit_mask, n_geom) in global frame:
                 - t: Per-ray distances [mm], shape (N,). inf if no hit.
                 - normals: Surface normals in global frame, shape (N, 3).
                 - hit_mask: Boolean hit mask, shape (N,).
+                - n_geom: Geometric (unflipped, direction-independent)
+                    surface normal in global frame, shape (N, 3). See
+                    :meth:`ComponentGeometry.ray_intersect`.
         """
         translation, rot = _get_transform(self.cs)
 
@@ -95,7 +108,7 @@ class BaseComponent(ABC):
         positions_l = (positions_g - t_be) @ R_be
         directions_l = directions_g @ R_be
 
-        t_hit, normals_l, hit_mask = self.geometry.ray_intersect(
+        t_hit, normals_l, hit_mask, n_geom_l = self.geometry.ray_intersect(
             positions_l, directions_l
         )
 
@@ -111,8 +124,9 @@ class BaseComponent(ABC):
 
         # Transform normals back to global: n_global_row = n_local_row @ R^T
         normals_g = normals_l @ R_be.T
+        n_geom_g = n_geom_l @ R_be.T
 
-        return t_hit, normals_g, hit_mask
+        return t_hit, normals_g, hit_mask, n_geom_g
 
     @abstractmethod
     def interact(
@@ -121,19 +135,52 @@ class BaseComponent(ABC):
         t: np.ndarray,
         normals: np.ndarray,
         hit_mask: np.ndarray,
-        rng: np.random.Generator,
+        rng: NSQRng,
+        bsdf_ir: BsdfIR,
+        n_geom: np.ndarray,
+        sampling: SamplingPolicy | None = None,
+        forced_branch: str | None = None,
     ) -> None:
         """Apply optical interaction at hit points (in-place).
 
         Updates ray positions, directions, flux, n_current, bounce, and
         alive status for rays that hit this component.
 
+        This is a private implementation detail of the reference NumPy/Torch
+        interpreters (``optiland.nonsequential.ir.interpreter
+        .apply_primitive_interactions``), not the engine's public dispatch
+        contract -- a non-Python backend never calls it. ``bsdf_ir`` is what
+        makes the *dispatch* IR-driven: whether to route a hit ray through
+        ``self.bsdf`` is decided from ``bsdf_ir.kind`` (verified to match
+        ``self.bsdf``'s actual type by the caller), not from a bare
+        ``self.bsdf is not None`` check.
+
         Args:
             rays: Ray bundle to update in-place.
             t: Hit distances [mm], shape (N,).
             normals: Surface normals in global frame, shape (N, 3).
             hit_mask: True for rays that hit this component, shape (N,).
-            rng: Random number generator for stochastic interactions.
+            rng: Keyed PCG32 RNG for stochastic interactions.
+            bsdf_ir: This surface's lowered BSDF descriptor (``BsdfIR(kind=
+                "none")`` when no scatter model is attached), matching
+                ``self.bsdf``.
+            n_geom: Geometric (unflipped) surface normal in global frame,
+                shape (N, 3): points from ``material_front`` toward
+                ``material_back``. ``RefractiveComponent`` uses this,
+                not index proximity, to determine which material a ray is
+                entering.
+            sampling: The scene's rare-path sampling policy.
+                Only ``RefractiveComponent`` consults it, to resolve the
+                Fresnel reflect/transmit branch probability; ``None`` is
+                treated as the default (unbiased, ``reflect_prob="fresnel"``)
+                policy.
+            forced_branch: ``"reflect"`` or ``"transmit"`` to deterministically
+                force the branch instead of drawing it, or ``None`` for the
+                normal stochastic draw. Used only by the NumPy forward
+                engine's bounded-splitting orchestration (PR11;
+                :mod:`optiland.nonsequential.ir.interpreter`) to build both
+                children of a split ray; ignored by every component except
+                ``RefractiveComponent``.
         """
 
     @property

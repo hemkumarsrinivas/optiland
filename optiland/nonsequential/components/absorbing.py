@@ -18,8 +18,11 @@ if TYPE_CHECKING:
 
     from optiland.coordinate_system import CoordinateSystem
     from optiland.nonsequential.components.geometry.base import ComponentGeometry
+    from optiland.nonsequential.ir.bsdf_ir import BsdfIR
+    from optiland.nonsequential.ir.scene_ir import SamplingPolicy
     from optiland.nonsequential.materials.nsq_material import NSQMaterial
     from optiland.nonsequential.ray_bundle import NSQRayBundle
+    from optiland.nonsequential.rng import NSQRng
 
 
 class AbsorbingComponent(BaseComponent):
@@ -58,7 +61,11 @@ class AbsorbingComponent(BaseComponent):
         t: np.ndarray,
         normals: np.ndarray,
         hit_mask: np.ndarray,
-        rng: np.random.Generator,
+        rng: NSQRng,
+        bsdf_ir: BsdfIR,
+        n_geom: np.ndarray,
+        sampling: SamplingPolicy | None = None,
+        forced_branch: str | None = None,
     ) -> None:
         """Kill all rays that hit this component (in-place).
 
@@ -67,7 +74,13 @@ class AbsorbingComponent(BaseComponent):
             t: Hit distances [mm], shape (N,).
             normals: Surface normals in global frame, shape (N, 3).
             hit_mask: True for rays hitting this component, shape (N,).
-            rng: Random number generator (unused).
+            rng: Keyed PCG32 RNG (unused).
+            bsdf_ir: Unused -- absorbing surfaces never scatter.
+            n_geom: Unused -- absorbing surfaces never determine sidedness.
+            sampling: Unused -- an absorber has no stochastic branch (D2,
+                PR11).
+            forced_branch: Unused -- bounded splitting only applies
+                to ``RefractiveComponent``.
         """
         # Missed rays carry t = inf; zero it before the position update so the
         # masked-out be.where branch cannot backpropagate 0 * inf = NaN into
